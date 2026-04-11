@@ -168,5 +168,5 @@ async def publish_job(spec: JobSpec, credentials: ConfluentCloudCredentials):
     return await publish_job_impl(spec, credentials)
 
 if __name__ == "__main__":
-    #mcp.run(host="0.0.0.0", port=8000, transport="http")
-    mcp.run()
+    mcp.run(host="0.0.0.0", port=8000, transport="http")
+    #mcp.run()
