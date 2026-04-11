@@ -1,0 +1,13 @@
+CREATE TABLE `{{ destination_topic }}` (
+{{ destination_column_definitions | indent(2, true) }}
+) WITH (
+  'connector' = 'confluent',
+  'topic' = '{{ destination_topic }}',
+  'value.format' = '{{ target_format | upper }}'
+) ;
+
+INSERT INTO `{{ destination_topic }}`
+SELECT
+{{ destination_select_expressions | indent(2, true) }}
+FROM `{{ source_topic }}`
+{% if filter_conditions %}WHERE {{ filter_conditions | join(" AND ") }}{% endif %};

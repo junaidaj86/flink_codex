@@ -1,0 +1,6 @@
+[project]
+name = "flink_codex"
+entrypoint = "src/flink_codex/server.py"
+
+[mcp]
+transport = "stdio"

@@ -1,0 +1,15 @@
+## {{ table_title }}
+
+Pattern: `{{ pattern_type }}`
+
+{{ transformation_summary }}
+
+| {% for column in table_columns %}{{ column }} |{% endfor %}
+| {% for column in table_columns %}--- |{% endfor %}
+{% for row in table_rows -%}
+| {% for cell in row %}{{ cell }} |{% endfor %}
+{% endfor %}
+
+Filtered out: {{ filtered_out_count }}
+Invalid records: {{ invalid_records }}
+Mapping: {{ mapping_explanation | join(", ") }}
