@@ -25,6 +25,7 @@ async def test_create_flink_job_from_structured_request(sample_json_request: Job
             }
         )
     )
+    assert result["api_version"] == "v1"
     assert result["selected_pattern"] == "json_to_json_simple_filter"
     assert result["validation"]["valid"] is True
     assert result["job_spec"] is not None
@@ -59,6 +60,7 @@ async def test_create_flink_job_from_natural_language_with_source_schema() -> No
             },
         },
     )
+    assert result["api_version"] == "v1"
     assert result["selected_pattern"] == "nested_json_to_avro"
     assert result["validation"]["valid"] is True
     assert result["normalized_request"]["generated_avro_schema"] is not None
@@ -98,6 +100,7 @@ async def test_create_flink_job_generates_destination_json_schema_for_flattening
             },
         },
     )
+    assert result["api_version"] == "v1"
     assert result["selected_pattern"] == "nested_json_to_flat_json"
     assert result["validation"]["valid"] is True
     assert result["normalized_request"]["generated_json_schema"] is not None
@@ -128,9 +131,63 @@ async def test_create_flink_job_validation_failure_returns_consolidated_response
             inline_schema=None,
         )
     )
+    assert result["api_version"] == "v1"
     assert result["validation"]["valid"] is False
     assert result["validation"]["error_code"] == "SCHEMA_NOT_PROVIDED"
     assert result["job_spec"] is None
     assert result["flink_sql"] is None
     assert result["sql_artifact"] is None
     assert result["schema_artifact"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_flink_job_v1_contract_contains_required_fields(
+    sample_json_request: JobRequest,
+) -> None:
+    result = await create_flink_job(
+        request=sample_json_request.model_copy(
+            update={
+                "sample_source_records": None,
+                "source_schema": {
+                    "type": "object",
+                    "properties": {
+                        "order_id": {"type": "string"},
+                        "status": {"type": "string"},
+                        "amount": {"type": "number"},
+                    },
+                },
+            }
+        )
+    )
+
+    required_keys = {
+        "api_version",
+        "selected_pattern",
+        "normalized_request",
+        "schema_resolution",
+        "validation",
+        "job_spec",
+        "flink_sql",
+        "destination_schema",
+        "destination_schema_format",
+        "destination_schema_json",
+        "destination_schema_avro",
+        "sql_artifact",
+        "schema_artifact",
+        "response_markdown",
+        "source_preview",
+        "destination_preview",
+        "preview_skipped_reason",
+        "assumptions",
+        "warnings",
+        "next_action",
+        "dry_run",
+        "publish_result",
+    }
+
+    assert result["api_version"] == "v1"
+    assert required_keys.issubset(result.keys())
+    assert isinstance(result["validation"], dict)
+    assert isinstance(result["assumptions"], list)
+    assert isinstance(result["warnings"], list)
+    assert isinstance(result["next_action"], str)

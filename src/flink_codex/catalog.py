@@ -34,14 +34,17 @@ class PatternCatalog:
             "filter_expression",
             "mapping_definition",
             "schema_reference",
+            "inline_schema",
+            "source_schema",
             "sample_source_records",
             "confluent_credentials",
         ]
         conditional: list[str] = []
         if pattern.requires_flatten_rules:
             conditional.append("flatten_rules")
+        conditional.append("source_schema")
         if pattern.target_format == "avro":
-            conditional.append("schema_reference|confluent_credentials")
+            conditional.append("inline_schema|source_schema")
         return {"required": required, "optional": optional, "conditional": conditional}
 
 
@@ -87,7 +90,7 @@ catalog = PatternCatalog(
             source_format="avro",
             target_format="avro",
             requires_flatten_rules=False,
-            requires_schema_reference=True,
+            requires_schema_reference=False,
             supports_nested_source=False,
             supports_nested_target=False,
         ),
@@ -98,7 +101,7 @@ catalog = PatternCatalog(
             source_format="avro",
             target_format="avro",
             requires_flatten_rules=False,
-            requires_schema_reference=True,
+            requires_schema_reference=False,
             supports_nested_source=True,
             supports_nested_target=True,
         ),
@@ -109,7 +112,7 @@ catalog = PatternCatalog(
             source_format="avro",
             target_format="avro",
             requires_flatten_rules=True,
-            requires_schema_reference=True,
+            requires_schema_reference=False,
             supports_nested_source=True,
             supports_nested_target=False,
         ),
@@ -120,7 +123,7 @@ catalog = PatternCatalog(
             source_format="json",
             target_format="avro",
             requires_flatten_rules=False,
-            requires_schema_reference=True,
+            requires_schema_reference=False,
             supports_nested_source=True,
             supports_nested_target=False,
         ),
@@ -131,7 +134,7 @@ catalog = PatternCatalog(
             source_format="json",
             target_format="avro",
             requires_flatten_rules=False,
-            requires_schema_reference=True,
+            requires_schema_reference=False,
             supports_nested_source=False,
             supports_nested_target=False,
         ),

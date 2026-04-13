@@ -162,7 +162,11 @@ class JobSpec(BaseModel):
     source_format: str
     target_format: str
     schema_reference: str | None
+    filter_expression: FilterExpression | None = None
+    mapping_definition: MappingDefinition | None = None
+    flatten_rules: FlattenRules | None = None
     inline_schema: str | None = None
+    source_schema: dict[str, Any] | None = None
     generated_json_schema: dict[str, Any] | None = None
     generated_avro_schema: str | None = None
     validation_status: Literal["pending", "passed", "failed"] = "pending"

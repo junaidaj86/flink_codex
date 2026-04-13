@@ -272,6 +272,7 @@ The consolidated response from `create_flink_job` should include:
 
 ```json
 {
+  "api_version": "v1",
   "selected_pattern": "string",
   "normalized_request": {},
   "schema_resolution": null,
@@ -305,13 +306,38 @@ The consolidated response from `create_flink_job` should include:
 ```
 
 Notes:
+- `api_version` defines the current public response contract version and is fixed at `v1`
 - `schema_resolution` is normally `null` in this version because registry resolution is not used
 - `destination_schema_json` and `destination_schema_avro` are convenience output fields
 - `response_markdown` is a preformatted summary for clients that do not reliably surface nested fields
 
 ---
 
-13. Publish Rules
+13. API Versioning and Compatibility
+
+The current public contract is `v1`.
+
+Compatibility rules for `v1`:
+- do not remove existing response fields
+- do not rename existing response fields
+- do not change the type of an existing response field
+- only add new fields if they are optional and non-breaking
+- keep existing public tool names stable within `v1`
+
+Deprecation rules:
+- add the replacement field before deprecating the old one
+- keep deprecated fields working for the lifetime of `v1`
+- mark deprecated fields clearly in documentation
+- any incompatible contract change requires a new versioned contract
+
+Versioning guidance:
+- prefer extending `create_flink_job` in backward-compatible ways within `v1`
+- if a breaking change is needed, introduce a new version such as `v2`
+- enforce compatibility with contract tests
+
+---
+
+14. Publish Rules
 
 Publish is optional and explicit.
 
@@ -323,7 +349,7 @@ Rules:
 
 ---
 
-14. Guardrails
+15. Guardrails
 
 Functional
 - do not invent mappings silently
@@ -349,7 +375,7 @@ Execution
 
 ---
 
-15. Error Handling
+16. Error Handling
 
 Blocking errors:
 - unsupported pattern
@@ -367,7 +393,7 @@ Non-blocking warnings:
 
 ---
 
-16. Strategic Principle
+17. Strategic Principle
 
 The system must generate reviewable deployment artifacts from a validated request.
 
