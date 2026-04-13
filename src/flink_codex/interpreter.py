@@ -97,6 +97,22 @@ def _extract_numeric_condition(query: str) -> tuple[str, str] | None:
     return match.group(1), match.group(2)
 
 
+def _detect_source_format(query: str) -> str:
+    """Detect the source format from explicit request wording only."""
+    lowered = query.lower()
+    if any(token in lowered for token in ("from avro", "read avro", "source format avro", "avro source")):
+        return "avro"
+    return "json"
+
+
+def _detect_target_format(query: str) -> str:
+    """Detect the target format from explicit target wording."""
+    lowered = query.lower()
+    if any(token in lowered for token in (" to avro", "as avro", "avro topic", "target format avro", "into avro")):
+        return "avro"
+    return "json"
+
+
 def _extract_leaf_paths_from_json_schema(schema: dict[str, Any], prefix: str = "") -> list[str]:
     """Extract leaf paths from a JSON schema."""
     schema_type = schema.get("type")
@@ -209,8 +225,8 @@ def interpret_customer_request(
         return interpretation_error("Could not determine filter condition from the request.")
 
     raw_field, threshold = condition
-    source_format = "avro" if "avro" in user_query.lower() else "json"
-    target_format = "avro" if " to avro" in user_query.lower() or "as avro" in user_query.lower() or "avro topic" in user_query.lower() else "json"
+    source_format = _detect_source_format(user_query)
+    target_format = _detect_target_format(user_query)
     filter_field_path = _resolve_field_path(raw_field, source_schema)
     pattern_type = _select_pattern(source_format, target_format, filter_field_path, user_query)
     include_fields = _build_include_fields(filter_field_path, source_schema)

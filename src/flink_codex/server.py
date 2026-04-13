@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
+from typing import Any
 
 from fastapi import FastAPI
 from fastmcp import FastMCP
@@ -11,12 +13,14 @@ from flink_codex.catalog import catalog
 from flink_codex.interpreter import interpret_customer_request as interpret_customer_request_impl
 from flink_codex.models import (
     ConfluentCloudCredentials,
+    DryRunResult,
     FilterExpression,
     JobRequest,
     JobSpec,
     MappingDefinition,
     NormalizedJobRequest,
     PatternDefinition,
+    PublishResult,
     SchemaResolutionResult,
     TransformPreview,
     ValidationResult,
@@ -40,6 +44,86 @@ from flink_codex.validation import (
 
 app = FastAPI(title="Flink Codex", version="0.1.0")
 mcp = FastMCP("flink-clean-job-creator")
+
+
+def _next_action_for_success(*, has_samples: bool, publish_requested: bool) -> str:
+    """Return the next operational step for a successful generation flow."""
+    if publish_requested:
+        return "Review the generated Flink SQL and publish result."
+    if not has_samples:
+        return "Provide sample_source_records to generate deterministic source and destination previews."
+    return "Review the generated Flink SQL and run dry_run_publish before publishing."
+
+
+def _build_create_response(
+    *,
+    selected_pattern: str | None,
+    normalized_request: NormalizedJobRequest | None,
+    schema_resolution: SchemaResolutionResult | None,
+    validation: ValidationResult,
+    job_spec: JobSpec | None,
+    flink_sql: str | None,
+    source_preview: str | None,
+    destination_preview: str | None,
+    preview_skipped_reason: str | None,
+    assumptions: list[str],
+    warnings: list[str],
+    next_action: str,
+    dry_run: DryRunResult | None = None,
+    publish_result: PublishResult | None = None,
+) -> dict[str, Any]:
+    """Build the consolidated create_flink_job response payload."""
+    destination_schema: dict[str, Any] | str | None = None
+    destination_schema_format: str | None = None
+    destination_schema_json: str | None = None
+    destination_schema_avro: str | None = None
+    if job_spec is not None:
+        if job_spec.generated_json_schema is not None:
+            destination_schema = job_spec.generated_json_schema
+            destination_schema_format = "json"
+            destination_schema_json = json.dumps(job_spec.generated_json_schema, indent=2)
+        elif job_spec.inline_schema is not None:
+            destination_schema = job_spec.inline_schema
+            destination_schema_format = "avro"
+            destination_schema_avro = job_spec.inline_schema
+        elif job_spec.generated_avro_schema is not None:
+            destination_schema = job_spec.generated_avro_schema
+            destination_schema_format = "avro"
+            destination_schema_avro = job_spec.generated_avro_schema
+    elif normalized_request is not None:
+        if normalized_request.generated_json_schema is not None:
+            destination_schema = normalized_request.generated_json_schema
+            destination_schema_format = "json"
+            destination_schema_json = json.dumps(normalized_request.generated_json_schema, indent=2)
+        elif normalized_request.inline_schema is not None:
+            destination_schema = normalized_request.inline_schema
+            destination_schema_format = "avro"
+            destination_schema_avro = normalized_request.inline_schema
+        elif normalized_request.generated_avro_schema is not None:
+            destination_schema = normalized_request.generated_avro_schema
+            destination_schema_format = "avro"
+            destination_schema_avro = normalized_request.generated_avro_schema
+
+    return {
+        "selected_pattern": selected_pattern,
+        "normalized_request": normalized_request.model_dump(mode="json") if normalized_request else None,
+        "schema_resolution": schema_resolution.model_dump(mode="json") if schema_resolution else None,
+        "validation": validation.model_dump(mode="json"),
+        "job_spec": job_spec.model_dump(mode="json") if job_spec else None,
+        "flink_sql": flink_sql,
+        "destination_schema": destination_schema,
+        "destination_schema_format": destination_schema_format,
+        "destination_schema_json": destination_schema_json,
+        "destination_schema_avro": destination_schema_avro,
+        "source_preview": source_preview,
+        "destination_preview": destination_preview,
+        "preview_skipped_reason": preview_skipped_reason,
+        "assumptions": assumptions,
+        "warnings": warnings,
+        "next_action": next_action,
+        "dry_run": dry_run.model_dump(mode="json") if dry_run else None,
+        "publish_result": publish_result.model_dump(mode="json") if publish_result else None,
+    }
 
 
 @app.get("/healthz")
@@ -167,6 +251,185 @@ async def publish_job(spec: JobSpec, credentials: ConfluentCloudCredentials):
     """Publish a job after validation preconditions pass."""
     return await publish_job_impl(spec, credentials)
 
+
+@mcp.tool(name="create_flink_job", description="Create a Flink job from either a natural-language request or a structured JobRequest.")
+async def create_flink_job(
+    user_query: str | None = None,
+    request: JobRequest | None = None,
+    source_schema: dict | None = None,
+    sample_source_records: list[dict[str, Any]] | None = None,
+    inline_schema: str | None = None,
+    publish: bool = False,
+    credentials: ConfluentCloudCredentials | None = None,
+) -> dict[str, Any]:
+    """Run the end-to-end job creation flow and return a consolidated result."""
+    assumptions: list[str] = []
+    warnings: list[str] = []
+
+    if request is None and user_query is None:
+        validation = ValidationResult(
+            valid=False,
+            error_code="MISSING_REQUIRED_FIELD",
+            error_message="Provide either user_query or request.",
+        )
+        return _build_create_response(
+            selected_pattern=None,
+            normalized_request=None,
+            schema_resolution=None,
+            validation=validation,
+            job_spec=None,
+            flink_sql=None,
+            source_preview=None,
+            destination_preview=None,
+            preview_skipped_reason=None,
+            assumptions=[],
+            warnings=[],
+            next_action="Provide either a natural-language user_query or a structured request.",
+        )
+
+    if request is not None:
+        effective_request = request.model_copy(
+            update={
+                "source_schema": source_schema or request.source_schema,
+                "sample_source_records": sample_source_records or request.sample_source_records,
+                "inline_schema": inline_schema or request.inline_schema,
+            }
+        )
+    else:
+        interpreted = interpret_customer_request_impl(user_query or "", source_schema)
+        if isinstance(interpreted, ValidationResult):
+            return _build_create_response(
+                selected_pattern=None,
+                normalized_request=None,
+                schema_resolution=None,
+                validation=interpreted,
+                job_spec=None,
+                flink_sql=None,
+                source_preview=None,
+                destination_preview=None,
+                preview_skipped_reason=None,
+                assumptions=[],
+                warnings=[],
+                next_action="Provide a clearer request with source topic, destination topic, filter condition, and source_schema.",
+            )
+        effective_request = interpreted.model_copy(
+            update={
+                "source_schema": source_schema or interpreted.source_schema,
+                "sample_source_records": sample_source_records,
+                "inline_schema": inline_schema,
+            }
+        )
+        assumptions.append("The natural-language request was interpreted into a supported pattern before validation.")
+
+    selected_pattern = effective_request.pattern_type
+    validation = await validate_job_request_impl(effective_request)
+    warnings.extend(validation.warnings)
+    if not validation.valid:
+        return _build_create_response(
+            selected_pattern=selected_pattern,
+            normalized_request=None,
+            schema_resolution=None,
+            validation=validation,
+            job_spec=None,
+            flink_sql=None,
+            source_preview=None,
+            destination_preview=None,
+            preview_skipped_reason=None,
+            assumptions=assumptions,
+            warnings=warnings,
+            next_action="Correct the validation error and resubmit the request.",
+        )
+
+    normalized_request = await generate_normalized_request(effective_request)
+    schema_resolution = normalized_request.resolved_schema
+
+    source_preview: str | None = None
+    destination_preview: str | None = None
+    preview_skipped_reason: str | None = None
+    if effective_request.sample_source_records:
+        preview_result = await generate_transform_preview(effective_request)
+        if isinstance(preview_result, ValidationResult):
+            warnings.append(preview_result.error_message or "Preview generation failed.")
+            preview_skipped_reason = preview_result.error_message or "Preview generation failed."
+        else:
+            source_preview = await render_source_sample_table_impl(preview_result)
+            destination_preview = await render_destination_sample_table_impl(preview_result)
+            if preview_result.filtered_out_count:
+                warnings.append(f"Preview filtered out {preview_result.filtered_out_count} record(s).")
+            if preview_result.invalid_records:
+                warnings.append(f"Preview found invalid records at indexes: {preview_result.invalid_records}.")
+    else:
+        preview_skipped_reason = "sample_source_records not provided"
+
+    job_spec = await generate_job_spec_impl(normalized_request)
+    flink_sql = await generate_flink_sql_impl(job_spec)
+
+    dry_run_result: DryRunResult | None = None
+    publish_result: PublishResult | None = None
+    if publish:
+        if credentials is None:
+            validation = ValidationResult(
+                valid=False,
+                error_code="CREDENTIAL_MISSING",
+                error_message="Publishing requires credentials.",
+                warnings=warnings,
+            )
+            return _build_create_response(
+                selected_pattern=selected_pattern,
+                normalized_request=normalized_request,
+                schema_resolution=schema_resolution,
+                validation=validation,
+                job_spec=job_spec,
+                flink_sql=flink_sql,
+                source_preview=source_preview,
+                destination_preview=destination_preview,
+                preview_skipped_reason=preview_skipped_reason,
+                assumptions=assumptions,
+                warnings=warnings,
+                next_action="Provide valid Confluent credentials before publishing.",
+            )
+        dry_run_result = await dry_run_publish_impl(job_spec, credentials)
+        if not dry_run_result.passed:
+            warnings.extend(dry_run_result.validation.warnings)
+            return _build_create_response(
+                selected_pattern=selected_pattern,
+                normalized_request=normalized_request,
+                schema_resolution=schema_resolution,
+                validation=validation,
+                job_spec=job_spec,
+                flink_sql=flink_sql,
+                source_preview=source_preview,
+                destination_preview=destination_preview,
+                preview_skipped_reason=preview_skipped_reason,
+                assumptions=assumptions,
+                warnings=warnings,
+                next_action="Resolve the dry-run errors before publishing.",
+                dry_run=dry_run_result,
+            )
+        publish_result = await publish_job_impl(job_spec, credentials)
+        if not publish_result.published and publish_result.error_message:
+            warnings.append(publish_result.error_message)
+
+    return _build_create_response(
+        selected_pattern=selected_pattern,
+        normalized_request=normalized_request,
+        schema_resolution=schema_resolution,
+        validation=validation,
+        job_spec=job_spec,
+        flink_sql=flink_sql,
+        source_preview=source_preview,
+        destination_preview=destination_preview,
+        preview_skipped_reason=preview_skipped_reason,
+        assumptions=assumptions,
+        warnings=warnings,
+        next_action=_next_action_for_success(
+            has_samples=bool(effective_request.sample_source_records),
+            publish_requested=publish,
+        ),
+        dry_run=dry_run_result,
+        publish_result=publish_result,
+    )
+
 if __name__ == "__main__":
-    mcp.run(host="0.0.0.0", port=8000, transport="http")
-    #mcp.run()
+    #mcp.run(host="0.0.0.0", port=8000, transport="http")
+    mcp.run(transport="stdio")
