@@ -33,6 +33,10 @@ async def test_create_flink_job_from_structured_request(sample_json_request: Job
     assert result["destination_schema"] is None
     assert result["destination_schema_json"] is None
     assert result["destination_schema_avro"] is None
+    assert result["sql_artifact"]["file_name"] == "orders_cleaned.json_to_json_simple_filter.sql.tpl"
+    assert result["sql_artifact"]["format"] == "sql.tpl"
+    assert result["schema_artifact"] is None
+    assert "Flink SQL:" in result["response_markdown"]
     assert result["preview_skipped_reason"] == "sample_source_records not provided"
 
 
@@ -62,7 +66,11 @@ async def test_create_flink_job_from_natural_language_with_source_schema() -> No
     assert result["destination_schema"] is not None
     assert result["destination_schema_json"] is None
     assert result["destination_schema_avro"] is not None
+    assert result["sql_artifact"]["file_name"] == "filter_order.nested_json_to_avro.sql.tpl"
+    assert result["schema_artifact"]["file_name"] == "filter_order.nested_json_to_avro.avsc"
+    assert result["schema_artifact"]["format"] == "avro"
     assert "'value.avro-schema'" in result["flink_sql"]
+    assert "Destination schema:" in result["response_markdown"]
 
 
 @pytest.mark.asyncio
@@ -97,8 +105,12 @@ async def test_create_flink_job_generates_destination_json_schema_for_flattening
     assert result["destination_schema"] is not None
     assert result["destination_schema_json"] is not None
     assert result["destination_schema_avro"] is None
+    assert result["sql_artifact"]["file_name"] == "flat_order_events.nested_json_to_flat_json.sql.tpl"
+    assert result["schema_artifact"]["file_name"] == "flat_order_events.nested_json_to_flat_json.schema.json"
+    assert result["schema_artifact"]["format"] == "json-schema"
     assert "data_total_amount" in result["normalized_request"]["generated_json_schema"]["properties"]
     assert result["job_spec"]["generated_json_schema"] is not None
+    assert "\"data_total_amount\"" in result["response_markdown"]
 
 
 @pytest.mark.asyncio
@@ -120,3 +132,5 @@ async def test_create_flink_job_validation_failure_returns_consolidated_response
     assert result["validation"]["error_code"] == "SCHEMA_NOT_PROVIDED"
     assert result["job_spec"] is None
     assert result["flink_sql"] is None
+    assert result["sql_artifact"] is None
+    assert result["schema_artifact"] is None

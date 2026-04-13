@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI
@@ -55,6 +55,145 @@ def _next_action_for_success(*, has_samples: bool, publish_requested: bool) -> s
     return "Review the generated Flink SQL and run dry_run_publish before publishing."
 
 
+def _artifact_stem(selected_pattern: str | None, normalized_request: NormalizedJobRequest | None, job_spec: JobSpec | None) -> str | None:
+    """Build a deterministic artifact name stem from destination topic and job type."""
+    destination_topic = None
+    if job_spec is not None:
+        destination_topic = job_spec.destination_topic
+    elif normalized_request is not None:
+        destination_topic = normalized_request.destination_topic
+    if destination_topic is None:
+        return None
+    topic_slug = destination_topic.replace(".", "_").replace("-", "_")
+    if selected_pattern is None:
+        return topic_slug
+    return f"{topic_slug}.{selected_pattern}"
+
+
+def _extract_destination_schema(
+    normalized_request: NormalizedJobRequest | None,
+    job_spec: JobSpec | None,
+) -> tuple[dict[str, Any] | str | None, str | None, str | None, str | None]:
+    """Return destination schema payload and serialized variants."""
+    destination_schema: dict[str, Any] | str | None = None
+    destination_schema_format: str | None = None
+    destination_schema_json: str | None = None
+    destination_schema_avro: str | None = None
+
+    if job_spec is not None:
+        if job_spec.generated_json_schema is not None:
+            destination_schema = job_spec.generated_json_schema
+            destination_schema_format = "json"
+            destination_schema_json = json.dumps(job_spec.generated_json_schema, indent=2)
+        elif job_spec.inline_schema is not None:
+            destination_schema = job_spec.inline_schema
+            destination_schema_format = "avro"
+            destination_schema_avro = job_spec.inline_schema
+        elif job_spec.generated_avro_schema is not None:
+            destination_schema = job_spec.generated_avro_schema
+            destination_schema_format = "avro"
+            destination_schema_avro = job_spec.generated_avro_schema
+        return (
+            destination_schema,
+            destination_schema_format,
+            destination_schema_json,
+            destination_schema_avro,
+        )
+
+    if normalized_request is not None:
+        if normalized_request.generated_json_schema is not None:
+            destination_schema = normalized_request.generated_json_schema
+            destination_schema_format = "json"
+            destination_schema_json = json.dumps(normalized_request.generated_json_schema, indent=2)
+        elif normalized_request.inline_schema is not None:
+            destination_schema = normalized_request.inline_schema
+            destination_schema_format = "avro"
+            destination_schema_avro = normalized_request.inline_schema
+        elif normalized_request.generated_avro_schema is not None:
+            destination_schema = normalized_request.generated_avro_schema
+            destination_schema_format = "avro"
+            destination_schema_avro = normalized_request.generated_avro_schema
+
+    return (
+        destination_schema,
+        destination_schema_format,
+        destination_schema_json,
+        destination_schema_avro,
+    )
+
+
+def _build_artifacts(
+    *,
+    artifact_stem: str | None,
+    flink_sql: str | None,
+    destination_schema_json: str | None,
+    destination_schema_avro: str | None,
+) -> tuple[dict[str, str] | None, dict[str, str] | None]:
+    """Build SQL and schema artifact metadata."""
+    sql_artifact = None
+    schema_artifact = None
+
+    if flink_sql is not None and artifact_stem is not None:
+        sql_artifact = {
+            "file_name": f"{artifact_stem}.sql.tpl",
+            "content": flink_sql,
+            "format": "sql.tpl",
+        }
+
+    if artifact_stem is not None:
+        if destination_schema_json is not None:
+            schema_artifact = {
+                "file_name": f"{artifact_stem}.schema.json",
+                "content": destination_schema_json,
+                "format": "json-schema",
+            }
+        elif destination_schema_avro is not None:
+            schema_artifact = {
+                "file_name": f"{artifact_stem}.avsc",
+                "content": destination_schema_avro,
+                "format": "avro",
+            }
+
+    return sql_artifact, schema_artifact
+
+
+def _build_response_markdown(
+    *,
+    selected_pattern: str | None,
+    validation: ValidationResult,
+    flink_sql: str | None,
+    destination_schema_json: str | None,
+    destination_schema_avro: str | None,
+    source_preview: str | None,
+    destination_preview: str | None,
+    preview_skipped_reason: str | None,
+    warnings: list[str],
+    next_action: str,
+) -> str:
+    """Build a preformatted user-facing response block."""
+    parts: list[str] = []
+    if selected_pattern is not None:
+        parts.append(f"Selected pattern: `{selected_pattern}`")
+    parts.append(f"Validation: `{'passed' if validation.valid else 'failed'}`")
+
+    if flink_sql is not None:
+        parts.append(f"Flink SQL:\n```sql\n{flink_sql.rstrip()}\n```")
+    if destination_schema_json is not None:
+        parts.append(f"Destination schema:\n```json\n{destination_schema_json.rstrip()}\n```")
+    elif destination_schema_avro is not None:
+        parts.append(f"Destination schema:\n```json\n{destination_schema_avro.rstrip()}\n```")
+    if source_preview is not None:
+        parts.append(f"Source preview:\n{source_preview.rstrip()}")
+    if destination_preview is not None:
+        parts.append(f"Destination preview:\n{destination_preview.rstrip()}")
+    if preview_skipped_reason is not None:
+        parts.append(f"Preview: {preview_skipped_reason}")
+    if warnings:
+        parts.append("Warnings:\n- " + "\n- ".join(warnings))
+    parts.append(f"Next action: {next_action}")
+    return "\n\n".join(parts)
+
+
 def _build_create_response(
     *,
     selected_pattern: str | None,
@@ -73,36 +212,32 @@ def _build_create_response(
     publish_result: PublishResult | None = None,
 ) -> dict[str, Any]:
     """Build the consolidated create_flink_job response payload."""
-    destination_schema: dict[str, Any] | str | None = None
-    destination_schema_format: str | None = None
-    destination_schema_json: str | None = None
-    destination_schema_avro: str | None = None
-    if job_spec is not None:
-        if job_spec.generated_json_schema is not None:
-            destination_schema = job_spec.generated_json_schema
-            destination_schema_format = "json"
-            destination_schema_json = json.dumps(job_spec.generated_json_schema, indent=2)
-        elif job_spec.inline_schema is not None:
-            destination_schema = job_spec.inline_schema
-            destination_schema_format = "avro"
-            destination_schema_avro = job_spec.inline_schema
-        elif job_spec.generated_avro_schema is not None:
-            destination_schema = job_spec.generated_avro_schema
-            destination_schema_format = "avro"
-            destination_schema_avro = job_spec.generated_avro_schema
-    elif normalized_request is not None:
-        if normalized_request.generated_json_schema is not None:
-            destination_schema = normalized_request.generated_json_schema
-            destination_schema_format = "json"
-            destination_schema_json = json.dumps(normalized_request.generated_json_schema, indent=2)
-        elif normalized_request.inline_schema is not None:
-            destination_schema = normalized_request.inline_schema
-            destination_schema_format = "avro"
-            destination_schema_avro = normalized_request.inline_schema
-        elif normalized_request.generated_avro_schema is not None:
-            destination_schema = normalized_request.generated_avro_schema
-            destination_schema_format = "avro"
-            destination_schema_avro = normalized_request.generated_avro_schema
+    (
+        destination_schema,
+        destination_schema_format,
+        destination_schema_json,
+        destination_schema_avro,
+    ) = _extract_destination_schema(normalized_request, job_spec)
+
+    artifact_stem = _artifact_stem(selected_pattern, normalized_request, job_spec)
+    sql_artifact, schema_artifact = _build_artifacts(
+        artifact_stem=artifact_stem,
+        flink_sql=flink_sql,
+        destination_schema_json=destination_schema_json,
+        destination_schema_avro=destination_schema_avro,
+    )
+    response_markdown = _build_response_markdown(
+        selected_pattern=selected_pattern,
+        validation=validation,
+        flink_sql=flink_sql,
+        destination_schema_json=destination_schema_json,
+        destination_schema_avro=destination_schema_avro,
+        source_preview=source_preview,
+        destination_preview=destination_preview,
+        preview_skipped_reason=preview_skipped_reason,
+        warnings=warnings,
+        next_action=next_action,
+    )
 
     return {
         "selected_pattern": selected_pattern,
@@ -115,6 +250,9 @@ def _build_create_response(
         "destination_schema_format": destination_schema_format,
         "destination_schema_json": destination_schema_json,
         "destination_schema_avro": destination_schema_avro,
+        "sql_artifact": sql_artifact,
+        "schema_artifact": schema_artifact,
+        "response_markdown": response_markdown,
         "source_preview": source_preview,
         "destination_preview": destination_preview,
         "preview_skipped_reason": preview_skipped_reason,
@@ -138,12 +276,19 @@ async def list_supported_patterns() -> list[PatternDefinition]:
     return list(catalog.patterns)
 
 
-@mcp.tool(name="describe_pattern", description="Describe a single supported pattern by id.")
+@mcp.tool(
+    name="describe_pattern",
+    description="Describe a single supported pattern by id.",
+)
 async def describe_pattern(pattern_type: str) -> PatternDefinition | ValidationResult:
     """Describe a pattern or return an unsupported pattern error."""
     pattern = catalog.by_id(pattern_type)
     if pattern is None:
-        return ValidationResult(valid=False, error_code="UNSUPPORTED_PATTERN", error_message=f"Unsupported pattern: {pattern_type}")
+        return ValidationResult(
+            valid=False,
+            error_code="UNSUPPORTED_PATTERN",
+            error_message=f"Unsupported pattern: {pattern_type}",
+        )
     return pattern
 
 
@@ -153,7 +298,10 @@ async def list_required_fields(pattern_type: str) -> dict[str, list[str]]:
     return catalog.required_fields(pattern_type)
 
 
-@mcp.tool(name="interpret_customer_request", description="Convert a natural-language customer request into a deterministic JobRequest.")
+@mcp.tool(
+    name="interpret_customer_request",
+    description="Convert a natural-language customer request into a deterministic JobRequest.",
+)
 async def interpret_customer_request(user_query: str, source_schema: dict | None = None) -> JobRequest | ValidationResult:
     """Interpret a natural-language request into a structured job request."""
     return interpret_customer_request_impl(user_query, source_schema)
@@ -165,13 +313,19 @@ async def validate_job_request(request: JobRequest) -> ValidationResult:
     return await validate_job_request_impl(request)
 
 
-@mcp.tool(name="validate_filter_expression", description="Validate a filter expression against an optional source schema.")
+@mcp.tool(
+    name="validate_filter_expression",
+    description="Validate a filter expression against an optional source schema.",
+)
 async def validate_filter_expression(expression: FilterExpression, source_schema: dict | None = None) -> ValidationResult:
     """Validate filter syntax and field references."""
     return await validate_filter_expression_impl(expression, source_schema)
 
 
-@mcp.tool(name="validate_schema_mapping", description="Validate schema mapping references against a source schema.")
+@mcp.tool(
+    name="validate_schema_mapping",
+    description="Validate schema mapping references against a source schema.",
+)
 async def validate_schema_mapping(
     mapping: MappingDefinition,
     source_schema: dict,
@@ -187,7 +341,10 @@ async def validate_avro_schema(schema_string: str) -> ValidationResult:
     return await validate_avro_schema_impl(schema_string)
 
 
-@mcp.tool(name="generate_normalized_request", description="Normalize a validated Flink clean job request.")
+@mcp.tool(
+    name="generate_normalized_request",
+    description="Normalize a validated Flink clean job request.",
+)
 async def generate_normalized_request(request: JobRequest) -> NormalizedJobRequest:
     """Normalize a request, applying defaults and resolving schema when needed."""
     resolved_schema = None
@@ -210,25 +367,37 @@ async def generate_normalized_request(request: JobRequest) -> NormalizedJobReque
     )
 
 
-@mcp.tool(name="generate_transform_preview", description="Generate a deterministic transform preview from user records.")
+@mcp.tool(
+    name="generate_transform_preview",
+    description="Generate a deterministic transform preview from user records.",
+)
 async def generate_transform_preview_tool(request: JobRequest) -> TransformPreview | ValidationResult:
     """Generate a preview or return a sample-records validation error."""
     return await generate_transform_preview(request)
 
 
-@mcp.tool(name="render_source_sample_table", description="Render the source sample table as markdown.")
+@mcp.tool(
+    name="render_source_sample_table",
+    description="Render the source sample table as markdown.",
+)
 async def render_source_sample_table(preview: TransformPreview) -> str:
     """Render the source preview table."""
     return await render_source_sample_table_impl(preview)
 
 
-@mcp.tool(name="render_destination_sample_table", description="Render the destination sample table as markdown.")
+@mcp.tool(
+    name="render_destination_sample_table",
+    description="Render the destination sample table as markdown.",
+)
 async def render_destination_sample_table(preview: TransformPreview) -> str:
     """Render the destination preview table."""
     return await render_destination_sample_table_impl(preview)
 
 
-@mcp.tool(name="generate_job_spec", description="Generate a job specification from a normalized request.")
+@mcp.tool(
+    name="generate_job_spec",
+    description="Generate a job specification from a normalized request.",
+)
 async def generate_job_spec(request: NormalizedJobRequest) -> JobSpec:
     """Generate a job spec."""
     return await generate_job_spec_impl(request)
@@ -240,19 +409,28 @@ async def generate_flink_sql(spec: JobSpec) -> str:
     return await generate_flink_sql_impl(spec)
 
 
-@mcp.tool(name="dry_run_publish", description="Run publish precondition checks without side effects.")
+@mcp.tool(
+    name="dry_run_publish",
+    description="Run publish precondition checks without side effects.",
+)
 async def dry_run_publish(spec: JobSpec, credentials: ConfluentCloudCredentials):
     """Perform a dry run publish."""
     return await dry_run_publish_impl(spec, credentials)
 
 
-@mcp.tool(name="publish_job", description="Publish a Flink SQL job to Confluent Cloud.")
+@mcp.tool(
+    name="publish_job",
+    description="Publish a Flink SQL job to Confluent Cloud.",
+)
 async def publish_job(spec: JobSpec, credentials: ConfluentCloudCredentials):
     """Publish a job after validation preconditions pass."""
     return await publish_job_impl(spec, credentials)
 
 
-@mcp.tool(name="create_flink_job", description="Create a Flink job from either a natural-language request or a structured JobRequest.")
+@mcp.tool(
+    name="create_flink_job",
+    description="Create a Flink job from either a natural-language request or a structured JobRequest.",
+)
 async def create_flink_job(
     user_query: str | None = None,
     request: JobRequest | None = None,
