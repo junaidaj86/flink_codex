@@ -6,282 +6,373 @@ It supports:
 - JSON and Avro formats
 - Nested and flat data structures
 - Filtering, projection, flattening, and format conversion
-- Inline schema usage for Avro targets
+- Deterministic destination schema generation from `source_schema`
 - Preview, validation, and controlled publish
+- Repo-ready SQL and schema artifacts
 
 ---
 
 2. High-Level Responsibilities
 
 The agent must:
-1. Interpret user requests (structured or natural language)
-2. Normalize input into a valid JobRequest
-3. Validate the request against supported patterns
-4. Use inline schema when required
-5. Generate transformation logic and Flink SQL
-6. Provide deterministic preview of transformations
-7. Perform dry-run validation before publish
-8. Publish job only when explicitly requested
+1. Accept a structured request or natural-language request
+2. Require `source_schema` for request execution
+3. Normalize input into a valid `JobRequest`
+4. Validate the request against supported patterns
+5. Generate destination schema when required by output structure or format
+6. Generate transformation logic and Flink SQL
+7. Provide deterministic preview when sample records are supplied
+8. Perform dry-run validation before publish
+9. Publish only when explicitly requested
 
 ---
 
-3. Supported Transformation Patterns
+3. Primary User-Facing MCP Tool
 
-3.1 Projection Patterns (Schema-Preserving)
+The primary user-facing MCP tool is:
+- `create_flink_job`
 
-These patterns DO NOT change structure, only filter/project fields.
-- json_to_json_simple_filter
-- json_to_json_nested_filter
-- avro_to_avro_simple_filter
-- nested_avro_to_nested_avro
+This tool is the main orchestration entry point.
 
-Schema behavior:
-- Reuse existing schema when possible
-- Require inline schema for Avro targets
+It is responsible for:
+- request interpretation
+- validation
+- normalization
+- preview generation
+- schema generation
+- job spec generation
+- SQL generation
+- optional dry-run
+- optional publish
 
----
-
-3.2 Flattening Patterns (Schema-Changing)
-- nested_json_to_flat_json
-- nested_avro_to_flat_avro
-
-Schema behavior (MANDATORY):
-- Structure changes -> output schema MUST differ
-- Agent MUST reflect the flattened output structure in SQL
-- Use flatten separator (default `_`) for field naming
+Lower-level MCP tools remain available for testing and debugging, but normal users should use `create_flink_job`.
 
 ---
 
-3.3 Cross-Format Patterns (Schema-Changing)
-- json_to_avro
-- nested_json_to_avro
+4. Supported Transformation Patterns
 
-Schema behavior (MANDATORY):
-- Format changes -> inline Avro schema MUST be provided
-- Agent MUST validate the provided schema before generation
+4.1 Projection Patterns
+- `json_to_json_simple_filter`
+- `json_to_json_nested_filter`
+- `avro_to_avro_simple_filter`
+- `nested_avro_to_nested_avro`
 
----
+4.2 Flattening Patterns
+- `nested_json_to_flat_json`
+- `nested_avro_to_flat_avro`
 
-4. Request Processing Flow
-
-Step 1: Interpret Request
-- Accept structured JSON or natural language
-- Convert into JobRequest
-
----
-
-Step 2: Normalize Request
-
-Ensure:
-- Valid pattern_type
-- Correct formats
-- Mapping definition exists
-- Filter expression validated if present
+4.3 Cross-Format Patterns
+- `json_to_avro`
+- `nested_json_to_avro`
 
 ---
 
-Step 3: Validate Request
+5. Request Requirements
 
-Validate:
-- Pattern compatibility
-- Field mappings
-- Filter expressions
-- Flatten rules (if applicable)
+All executable requests must include:
+- `source_topic`
+- `destination_topic`
+- `source_format`
+- `target_format`
+- `pattern_type`
+- `source_schema`
 
----
-
-5. Schema Handling (UPDATED - CRITICAL)
-
-The agent supports two schema roles:
-
-5.1 Inline Schema
-
-Used when:
-- `inline_schema` is provided
-
-This is the only executable schema input for Avro targets in this version.
-
----
-
-5.2 Schema Reference Metadata
-
-Used when:
-- `schema_reference` is provided
+Optional fields:
+- `filter_expression`
+- `mapping_definition`
+- `flatten_rules`
+- `inline_schema`
+- `schema_reference`
+- `sample_source_records`
+- `confluent_credentials`
 
 Rules:
-- Treat `schema_reference` as metadata only
-- Do NOT fetch from Schema Registry
-- Do NOT use `schema_reference` as a substitute for `inline_schema`
+- `source_schema` is required for all requests in this version
+- `schema_reference` is metadata only
+- `sample_source_records` is optional and only used for preview
+- `flatten_rules` is required for flattening patterns
 
 ---
 
-Schema Rules
-- Avro targets require `inline_schema`
-- JSON targets do not require Avro schema input
-- Do NOT reuse original schema if structure changes
-- Do NOT fetch external schemas in this version
-- If Avro schema is missing, fail validation with a schema error
+6. Schema Handling
 
----
+6.1 Source Schema
 
-6. Transformation Logic Generation
+`source_schema` is the required source-of-truth contract for:
+- field validation
+- mapping validation
+- destination schema generation
+- nested field resolution
+- SQL type derivation
 
-Based on pattern:
-- Projection -> field mapping
-- Filtering -> condition evaluation
-- Flattening -> path expansion
-- Nested mapping -> dot notation resolution
-- Format conversion -> JSON <-> Avro transformation
+Without `source_schema`, the request is incomplete for production use in this version.
 
----
+6.2 Inline Schema
 
-7. Preview Generation (Deterministic)
+`inline_schema` is optional and applies to Avro targets.
 
-If sample_source_records provided:
+Use it when:
+- the target Avro contract is already explicitly defined
 
-Agent must generate:
-- source_preview
-- destination_preview
-- filtered_out_count
-- invalid_records
+If `inline_schema` is present:
+- validate it
+- prefer it as the Avro sink contract
 
-Must be:
-- Deterministic
-- Side-effect free
+6.3 Schema Reference
 
----
-
-8. SQL Generation
-
-Generate Flink SQL:
-- Source definition
-- Transformation logic
-- Sink definition
-
-Must align with:
-- Mapping
-- Schema
-- Pattern
-
----
-
-9. Dry-Run Publish
-
-Validate:
-- Schema compatibility
-- SQL correctness
-- Configuration readiness
-
-Return:
-- warnings
-- errors
-
----
-
-10. Publish
-
-Only when explicitly requested.
+`schema_reference` is metadata only.
 
 Rules:
-- Never auto-publish
-- Must pass validation
-- Must not expose secrets
+- do not fetch from Schema Registry
+- do not use `schema_reference` as executable schema input
+- do not treat `schema_reference` as a substitute for `source_schema` or `inline_schema`
+
+6.4 Destination Schema Rules
+
+JSON targets:
+- if structure changes, generate destination JSON schema from `source_schema`
+- if structure does not change, destination JSON schema may be omitted
+
+Avro targets:
+- if `inline_schema` is present, validate and use it
+- otherwise generate destination Avro schema from `source_schema`
+
+General rules:
+- destination schema must reflect the actual output structure
+- do not reuse source schema when structure changes
+- do not fetch external schemas in this version
 
 ---
 
-11. Input Contract
+7. Request Processing Flow
 
-```json
-{
-  "pattern_type": "string",
-  "source_format": "json | avro",
-  "target_format": "json | avro",
-  "schema_reference": "optional",
-  "inline_schema": "optional",
-  "filter_expression": {
-    "include_fields": [],
-    "conditions": []
-  },
-  "mapping_definition": {
-    "mappings": {}
-  },
-  "flatten_rules": {
-    "separator": "_"
-  },
-  "sample_source_records": []
-}
-```
+Step 1: Intake
+- accept structured request or natural-language request
+- if natural language is used, convert it into a `JobRequest`
+
+Step 2: Validate
+- validate required fields
+- validate filter expressions
+- validate mappings
+- validate flatten rules when required
+- validate or generate destination schema as required
+
+Step 3: Normalize
+- generate normalized request
+- include generated destination schema where applicable
+
+Step 4: Preview
+- if `sample_source_records` exists, generate source and destination preview
+- if samples are absent, skip preview explicitly
+
+Step 5: Generate
+- generate job spec
+- generate Flink SQL
+- generate output artifacts
+
+Step 6: Publish
+- only if user explicitly requests publish
+- run dry-run first
+- publish only if dry-run passes
+
+---
+
+8. Pattern Rules
+
+`json_to_json_simple_filter`
+- top-level JSON filter/projection only
+- no structure change
+
+`json_to_json_nested_filter`
+- nested JSON field references allowed
+- nested JSON output preserved
+
+`nested_json_to_flat_json`
+- nested JSON source
+- flat JSON sink
+- output schema must change
+
+`json_to_avro`
+- top-level JSON source
+- Avro sink
+- Avro contract comes from `inline_schema` or generated from `source_schema`
+
+`nested_json_to_avro`
+- nested JSON source fields allowed
+- Avro sink
+- Avro contract comes from `inline_schema` or generated from `source_schema`
+
+`avro_to_avro_simple_filter`
+- top-level Avro fields only
+- no flattening
+
+`nested_avro_to_nested_avro`
+- nested Avro source fields allowed
+- no separator-based flattening
+- do not assume a structurally nested sink unless generated SQL and schema prove it
+
+`nested_avro_to_flat_avro`
+- nested Avro source
+- flat Avro sink
+- output schema must change
+
+---
+
+9. SQL Generation
+
+Generate Flink SQL that includes:
+- sink table definition
+- insert statement
+
+The generated SQL must align with:
+- validated request fields
+- destination schema
+- selected pattern
+- flattening rules when applicable
+
+---
+
+10. Preview Generation
+
+If `sample_source_records` is present:
+- generate `source_preview`
+- generate `destination_preview`
+- report `filtered_out_count`
+- report `invalid_records`
+
+Preview must be:
+- deterministic
+- side-effect free
+- based only on user-provided sample data
+
+---
+
+11. Artifact Output Contract
+
+The response must include repo-ready artifacts.
+
+SQL artifact:
+- file extension: `.sql.tpl`
+- file name format:
+  - `<destination_topic>.<pattern_type>.sql.tpl`
+
+Schema artifact:
+- JSON target with generated destination schema:
+  - `<destination_topic>.<pattern_type>.schema.json`
+- Avro target:
+  - `<destination_topic>.<pattern_type>.avsc`
+
+These artifacts are intended to be checked into source control and used by downstream pipeline automation.
 
 ---
 
 12. Output Contract
 
+The consolidated response from `create_flink_job` should include:
+
 ```json
 {
+  "selected_pattern": "string",
+  "normalized_request": {},
+  "schema_resolution": null,
+  "validation": {},
   "job_spec": {},
-  "generated_sql": "string",
-  "source_preview": [],
-  "destination_preview": [],
+  "flink_sql": "string",
+  "destination_schema": {},
+  "destination_schema_format": "json | avro | null",
+  "destination_schema_json": "string | null",
+  "destination_schema_avro": "string | null",
+  "sql_artifact": {
+    "file_name": "string",
+    "content": "string",
+    "format": "sql.tpl"
+  },
+  "schema_artifact": {
+    "file_name": "string",
+    "content": "string",
+    "format": "json-schema | avro"
+  },
+  "response_markdown": "string",
+  "source_preview": "string | null",
+  "destination_preview": "string | null",
+  "preview_skipped_reason": "string | null",
+  "assumptions": [],
   "warnings": [],
-  "errors": []
+  "next_action": "string",
+  "dry_run": null,
+  "publish_result": null
 }
 ```
 
+Notes:
+- `schema_resolution` is normally `null` in this version because registry resolution is not used
+- `destination_schema_json` and `destination_schema_avro` are convenience output fields
+- `response_markdown` is a preformatted summary for clients that do not reliably surface nested fields
+
 ---
 
-13. Pattern Selection Rules
+13. Publish Rules
 
-| Condition | Pattern |
-| --- | --- |
-| Flat JSON -> Flat JSON | json_to_json_simple_filter |
-| Nested JSON -> Nested JSON | json_to_json_nested_filter |
-| Nested JSON -> Flat JSON | nested_json_to_flat_json |
-| Flat JSON -> Avro | json_to_avro |
-| Nested JSON -> Avro | nested_json_to_avro |
-| Flat Avro -> Flat Avro | avro_to_avro_simple_filter |
-| Nested Avro -> Nested Avro | nested_avro_to_nested_avro |
-| Nested Avro -> Flat Avro | nested_avro_to_flat_avro |
+Publish is optional and explicit.
+
+Rules:
+- never auto-publish
+- always validate before publish
+- always run dry-run before publish
+- never expose credentials or secrets
 
 ---
 
 14. Guardrails
 
 Functional
-- Do NOT invent mappings
-- Do NOT assume missing fields
+- do not invent mappings silently
+- do not assume missing fields without `source_schema`
+- do not switch patterns silently
 
 Schema
-- MUST require `inline_schema` for Avro targets
-- MUST NOT use `schema_reference` for execution
+- require `source_schema`
+- use `inline_schema` only as an Avro override
+- do not execute using `schema_reference`
+- do not fetch external schemas
+- always make destination schema reflect output structure
 
 Security
-- Never expose credentials
-- Never auto-publish
+- never expose credentials
+- never expose tokens or secrets
+- never auto-publish
 
 Execution
-- Always validate before publish
-- Always generate preview if sample data exists
+- prefer `create_flink_job` for user-facing flows
+- always validate before generation
+- always make preview behavior explicit
 
 ---
 
 15. Error Handling
 
-Blocking
-- Invalid pattern
-- Missing required fields
-- Invalid mappings
+Blocking errors:
+- unsupported pattern
+- missing required fields
+- invalid filter expression
+- invalid mapping
+- flatten rules missing
+- schema not provided
+- schema incompatible
 
-Non-blocking
-- Generated schema instead of registry usage
-- Partial mappings
-- Unused fields
+Non-blocking warnings:
+- preview filtered out records
+- preview found invalid records
+- publish dry-run returned warnings
 
 ---
 
-16. Strategic Design Principle (Updated)
+16. Strategic Principle
 
-Schema must always reflect the output structure.
+The system must generate reviewable deployment artifacts from a validated request.
 
-- If structure changes -> schema changes
-- If format changes -> schema must be generated or transformed
-- If neither changes -> reuse schema
+That means:
+- require the source contract up front
+- derive the destination contract deterministically
+- return SQL and schema as explicit artifacts
+- make the output suitable for check-in and pipeline pickup
